@@ -297,7 +297,7 @@ static int client_xchange_metadata_with_server()
 		return ret;
 	}
 	debug("Server sent us its buffer location and credentials, showing \n");
-	show_rdma_buffer_attr(&server_metadata_attr);
+	show_rdma_buffer_attr(&client_metadata_attr);
 	return 0;
 }
 
@@ -352,7 +352,7 @@ static int client_remote_memory_ops()
 				ret);
 		return ret;
 	}
-	debug("Client side WRITE is complete \n");
+	printf("Client side WRITE is complete \n");
 	/* Now we prepare a READ using same variables but for destination */
 	client_send_sge.addr = (uint64_t) client_dst_mr->addr;
 	client_send_sge.length = (uint32_t) client_dst_mr->length;
@@ -384,6 +384,7 @@ static int client_remote_memory_ops()
 		return ret;
 	}
 	debug("Client side READ is complete \n");
+	printf("dst is %s\n", dst);
 	return 0;
 }
 
@@ -445,13 +446,59 @@ static int client_disconnect_and_clean()
 	/* Destroy protection domain */
 	ret = ibv_dealloc_pd(pd);
 	if (ret) {
-		rdma_error("Failed to destroy client protection domain cleanly, %d \n", -errno);
+		// rdma_error("Failed to destroy client protection domain cleanly, %d \n", -errno);
 		// we continue anyways;
 	}
 	rdma_destroy_event_channel(cm_event_channel);
 	printf("Client resource clean up is complete \n");
 	return 0;
 }
+
+static int client_remote_memory_write(char* content) 
+{
+	strncpy(src, content, strlen(content));
+	struct ibv_wc wc;
+	int ret = -1;
+	client_dst_mr = rdma_buffer_register(pd,
+			dst,
+			strlen(src),
+			(IBV_ACCESS_LOCAL_WRITE | 
+			 IBV_ACCESS_REMOTE_WRITE | 
+			 IBV_ACCESS_REMOTE_READ));
+	if (!client_dst_mr) {
+		rdma_error("We failed to create the destination buffer, -ENOMEM\n");
+		return -ENOMEM;
+	}
+	client_send_sge.addr = (uint64_t) client_src_mr->addr;
+	client_send_sge.length = (uint32_t) client_src_mr->length;
+	client_send_sge.lkey = client_src_mr->lkey;
+	bzero(&client_send_wr, sizeof(client_send_wr));
+	client_send_wr.sg_list = &client_send_sge;
+	client_send_wr.num_sge = 1;
+	client_send_wr.opcode = IBV_WR_RDMA_WRITE;
+	client_send_wr.send_flags = IBV_SEND_SIGNALED;
+	client_send_wr.wr.rdma.rkey = server_metadata_attr.stag.remote_stag;
+	client_send_wr.wr.rdma.remote_addr = server_metadata_attr.address;
+	ret = ibv_post_send(client_qp, 
+		       &client_send_wr,
+	       &bad_client_send_wr);
+	if (ret) {
+		rdma_error("Failed to write client src buffer, errno: %d \n", 
+				-errno);
+		return -errno;
+	}
+	ret = process_work_completion_events(io_completion_channel, 
+			&wc, 1);
+	if(ret != 1) {
+		rdma_error("We failed to get 1 work completions , ret = %d \n",
+				ret);
+		return ret;
+	}
+	printf("Client side WRITE is complete \n");
+	return 0;
+}
+
+
 
 void usage() {
 	printf("Usage:\n");
@@ -534,20 +581,16 @@ int main(int argc, char **argv) {
 		rdma_error("Failed to setup client connection , ret = %d \n", ret);
 		return ret;
 	}
-	ret = client_remote_memory_ops();
-	if (ret) {
-		rdma_error("Failed to finish remote memory ops, ret = %d \n", ret);
-		return ret;
-	}
-	if (check_src_dst()) {
-		rdma_error("src and dst buffers do not match \n");
-	} else {
-		printf("...\nSUCCESS, source and destination buffers match \n");
-	}
+
+	// just write to remote buffer
+	client_remote_memory_write("1");
+	sleep(10);
+	client_remote_memory_write("2");
+	sleep(10);
+
 	ret = client_disconnect_and_clean();
 	if (ret) {
 		rdma_error("Failed to cleanly disconnect and clean up resources \n");
 	}
 	return ret;
 }
-
